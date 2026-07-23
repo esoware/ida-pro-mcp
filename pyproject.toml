@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
     "idapro>=0.0.9",
     "tomli-w>=1.0.0",
+    "unicorn>=2.1.0",
 ]
 
 [dependency-groups]
