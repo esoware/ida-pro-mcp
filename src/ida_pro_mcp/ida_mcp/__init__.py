@@ -8,7 +8,7 @@ Architecture:
 - mcp.py: MCP protocol server (HTTP/SSE)
 - sync.py: IDA synchronization decorator (@idasync)
 - utils.py: Shared helpers and TypedDict definitions
-- api_*.py: Modular API implementations (75 tools + 24 resources)
+- api_*.py: Modular API implementations (87 tools + 24 resources)
 """
 
 # Ignore SIGPIPE to prevent IDA from being killed when an MCP client
@@ -38,6 +38,9 @@ from . import api_survey
 from . import api_composite
 from . import trace as trace
 from . import api_sigmaker
+from . import api_patch
+from . import api_segments
+from . import api_extra
 
 # Re-export key components for external use
 from .sync import idasync, IDAError, IDASyncError, CancelledError
@@ -66,6 +69,9 @@ __all__ = [
     "api_survey",
     "api_composite",
     "api_sigmaker",
+    "api_patch",
+    "api_segments",
+    "api_extra",
     # Re-exported components
     "idasync",
     "IDAError",
