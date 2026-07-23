@@ -14,7 +14,13 @@ import idautils
 
 from .rpc import tool
 from .sync import idasync
-from .utils import parse_address
+from .utils import (
+    Page,
+    normalize_dict_list,
+    paginate,
+    parse_address,
+    pattern_filter,
+)
 
 
 class ImportTilResult(TypedDict):
@@ -26,6 +32,25 @@ class ImportTilResult(TypedDict):
 class Label(TypedDict):
     addr: str
     name: str
+
+
+class Export(TypedDict):
+    addr: str
+    name: str
+    ordinal: int
+
+
+class ExportQuery(TypedDict, total=False):
+    """Export query with filtering and pagination"""
+
+    filter: Annotated[str, "Name glob/regex"]
+    offset: Annotated[int, "Start index"]
+    count: Annotated[int, "Max results (0=all)"]
+
+
+class ExportsQueryPage(TypedDict):
+    data: list[Export]
+    next_offset: int | None
 
 
 class StringInfo(TypedDict):
@@ -72,6 +97,50 @@ def list_labels(
         if seg.start_ea <= ea < seg.end_ea:
             out.append({"addr": hex(ea), "name": name})
     return out
+
+
+def _collect_exports() -> list[Export]:
+    """Collect all exports / entry points in the current database."""
+    out: list[Export] = []
+    for _index, ordinal, ea, name in idautils.Entries():
+        out.append(Export(addr=hex(ea), name=name or f"#{ordinal}", ordinal=ordinal))
+    return out
+
+
+@tool
+@idasync
+def exports(
+    offset: Annotated[int, "Starting pagination index (default: 0)"],
+    count: Annotated[int, "Maximum rows (0 returns all exports)"],
+) -> Page[Export]:
+    """List exports / entry points with ordinals using offset/count pagination."""
+    return paginate(_collect_exports(), offset, count)
+
+
+@tool
+@idasync
+def exports_query(
+    queries: Annotated[
+        list[ExportQuery] | ExportQuery,
+        "Export query with name filter and pagination",
+    ],
+) -> list[ExportsQueryPage]:
+    """Query exports with richer filtering than exports(offset,count)."""
+    queries = normalize_dict_list(queries)
+    all_exports = _collect_exports()
+    results = []
+
+    for query in queries:
+        filtered = all_exports
+        name_filter = query.get("filter", "")
+        if name_filter:
+            filtered = pattern_filter(filtered, name_filter, "name")
+
+        results.append(
+            paginate(filtered, query.get("offset", 0), query.get("count", 100))
+        )
+
+    return results
 
 
 def _xref_count(ea: int) -> int:
