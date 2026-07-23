@@ -8,15 +8,27 @@ listing that the core API only exposes via regex search or the survey top-15.
 import re
 from typing import Annotated, Any, NotRequired, TypedDict
 
+import idaapi
+import idc
+import ida_bytes
+import ida_funcs
 import ida_segment
 import ida_typeinf
 import idautils
+
+try:
+    import ida_hexrays
+except ImportError:  # decompiler not available
+    ida_hexrays = None
 
 from .rpc import tool
 from .sync import idasync
 from .utils import (
     Page,
+    Xref,
+    get_function,
     normalize_dict_list,
+    normalize_list_input,
     paginate,
     parse_address,
     pattern_filter,
@@ -51,6 +63,24 @@ class ExportQuery(TypedDict, total=False):
 class ExportsQueryPage(TypedDict):
     data: list[Export]
     next_offset: int | None
+
+
+class XrefsFromResult(TypedDict, total=False):
+    addr: str
+    xrefs: list[Xref] | None
+    more: bool
+    xref_count: int
+    message: str
+    error: str
+
+
+class CommentReadResult(TypedDict, total=False):
+    addr: str
+    regular: str | None
+    repeatable: str | None
+    function: str | None
+    decompiler: list[str]
+    error: str
 
 
 class StringInfo(TypedDict):
@@ -97,6 +127,126 @@ def list_labels(
         if seg.start_ea <= ea < seg.end_ea:
             out.append({"addr": hex(ea), "name": name})
     return out
+
+
+@tool
+@idasync
+def xrefs_from(
+    addrs: Annotated[list[str] | str, "Addresses or names to find cross-references FROM (e.g. '0x11a9', 'main')"],
+    limit: Annotated[int, "Max xrefs per address (default: 100, max: 1000)"] = 100,
+) -> list[XrefsFromResult]:
+    """Return xrefs from address(es) — the targets each address references."""
+    addrs = normalize_list_input(addrs)
+
+    if limit <= 0 or limit > 1000:
+        limit = 1000
+
+    results = []
+    for addr in addrs:
+        try:
+            ea = parse_address(addr)
+            if not ida_bytes.is_mapped(ea):
+                results.append(
+                    {"addr": addr, "xrefs": None, "error": f"Address not mapped: {addr}"}
+                )
+                continue
+
+            xrefs = []
+            more = False
+            for xref in idautils.XrefsFrom(ea, 0):
+                if len(xrefs) >= limit:
+                    more = True
+                    break
+                xrefs.append(
+                    Xref(
+                        addr=hex(xref.to),
+                        type="code" if xref.iscode else "data",
+                        fn=get_function(xref.to, raise_error=False),
+                    )
+                )
+            entry: XrefsFromResult = {
+                "addr": addr,
+                "xrefs": xrefs,
+                "more": more,
+                "xref_count": len(xrefs),
+            }
+            if not xrefs:
+                entry["message"] = "No cross-references from this address"
+            results.append(entry)
+        except Exception as e:
+            results.append({"addr": addr, "xrefs": None, "error": str(e)})
+
+    return results
+
+
+def _read_decompiler_comments(func_ea: int, ea: int) -> list[str]:
+    """Read saved decompiler user-comments at `ea` without decompiling."""
+    if ida_hexrays is None or not ida_hexrays.init_hexrays_plugin():
+        return []
+    out: list[str] = []
+    try:
+        umc = ida_hexrays.restore_user_cmts(func_ea)
+        if not umc:
+            return []
+        try:
+            it = ida_hexrays.user_cmts_begin(umc)
+            end = ida_hexrays.user_cmts_end(umc)
+            while it != end:
+                tl = ida_hexrays.user_cmts_first(it)
+                cmt = ida_hexrays.user_cmts_second(it)
+                if getattr(tl, "ea", idaapi.BADADDR) == ea:
+                    text = str(cmt)
+                    if text:
+                        out.append(text)
+                it = ida_hexrays.user_cmts_next(it)
+        finally:
+            ida_hexrays.user_cmts_free(umc)
+    except Exception:
+        return out
+    return out
+
+
+@tool
+@idasync
+def get_comments(
+    addrs: Annotated[list[str] | str, "Addresses or names to read comments from"],
+) -> list[CommentReadResult]:
+    """Read back comments at address(es): regular/repeatable disassembly, the
+    function comment (when the address is a function start), and decompiler
+    user-comments. This is the read counterpart to set_comments/append_comments.
+    """
+    addrs = normalize_list_input(addrs)
+
+    results: list[CommentReadResult] = []
+    for addr in addrs:
+        try:
+            ea = parse_address(addr)
+            if not ida_bytes.is_mapped(ea):
+                results.append({"addr": addr, "error": f"Address not mapped: {addr}"})
+                continue
+
+            row: CommentReadResult = {
+                "addr": addr,
+                "regular": idaapi.get_cmt(ea, False) or None,
+                "repeatable": idaapi.get_cmt(ea, True) or None,
+            }
+
+            fn = ida_funcs.get_func(ea)
+            if fn and fn.start_ea == ea:
+                row["function"] = (
+                    idc.get_func_cmt(ea, True) or idc.get_func_cmt(ea, False) or None
+                )
+
+            if fn:
+                decomp = _read_decompiler_comments(fn.start_ea, ea)
+                if decomp:
+                    row["decompiler"] = decomp
+
+            results.append(row)
+        except Exception as e:
+            results.append({"addr": addr, "error": str(e)})
+
+    return results
 
 
 def _collect_exports() -> list[Export]:
